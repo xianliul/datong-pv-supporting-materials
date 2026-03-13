@@ -1,0 +1,76 @@
+/**
+ * Verification of Environmental Homogeneity for PV Site and Control Area
+ * Objectives: Compare Topography, Soil Properties, LUCC, and Baseline NDVI (2010-2015).
+ */
+
+// 1. Load Study Areas
+var psf_area = ee.FeatureCollection('projects/ee-598372734/assets/daTong20250807');
+var control_area = ee.FeatureCollection('projects/ee-598372734/assets/dtPV_buffer1km0415');
+
+// 2. Topography Data (SRTM 30m)
+var elevation = ee.Image('USGS/SRTMGL1_003').select('elevation');
+var slope = ee.Terrain.slope(elevation).rename('slope');
+
+// 3. Soil Physical Properties (SOIL_90m)
+var sand = ee.Image('users/dsglsheng/SOIL_90m/btsnd05_90m').divide(10).rename('sand');
+var silt = ee.Image('users/dsglsheng/SOIL_90m/btslt05_90m').divide(10).rename('silt');
+var clay = ee.Image('users/dsglsheng/SOIL_90m/btcly05_90m').divide(10).rename('clay');
+var soc  = ee.Image('users/dsglsheng/SOIL_90m/soc05').divide(1000).rename('soc');
+
+// 4. Baseline NDVI (Annual Maxima 2010-2015)
+// Using Landsat 7 Collection 2 Level 2 for consistent pre-2016 baseline
+var years = ee.List.sequence(2010, 2015);
+var landsat_col = ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
+  .filterBounds(psf_area)
+  .map(function(img) {
+    var qa = img.select('QA_PIXEL');
+    var mask = qa.bitwiseAnd(1 << 3).or(qa.bitwiseAnd(1 << 4)).or(qa.bitwiseAnd(1 << 5)); 
+    return img.normalizedDifference(['SR_B4', 'SR_B3']).rename('ndvi').updateMask(mask.not());
+  });
+
+// Calculate the spatial median of the multi-year average of annual maximum NDVI
+var ndvi_max_baseline = ee.ImageCollection(years.map(function(y) {
+  var annual_max = landsat_col.filterDate(ee.Date.fromYMD(y, 1, 1), ee.Date.fromYMD(y, 12, 31)).max();
+  return annual_max.set('year', y);
+})).mean().rename('ndvi_max_baseline');
+
+// 5. Categorical Data: Soil Texture and LUCC 2010
+var soil_texture = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0');
+var lucc2010 = ee.Image('users/FJX/CLCD/CLCD_v01_2010_albert').rename('lucc');
+
+// --- Statistical Functions ---
+
+var calculateStats = function(region, label) {
+  // Continuous variables: Median + 1 Standard Deviation
+  var continuous_img = elevation.addBands([slope, sand, silt, clay, soc, ndvi_max_baseline]);
+  var cont_results = continuous_img.reduceRegion({
+    reducer: ee.Reducer.median().combine(ee.Reducer.stdDev(), null, true),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e13
+  });
+  
+  // Categorical variables: Frequency distribution
+  var cat_results = soil_texture.addBands(lucc2010).reduceRegion({
+    reducer: ee.Reducer.frequencyHistogram(),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e13
+  });
+
+  print(label + ' Statistical Results:', {
+    'Continuous (Median & SD)': cont_results,
+    'Categorical (Histogram)': cat_results
+  });
+};
+
+// --- Execution ---
+print('--- Processing Environmental Comparison ---');
+calculateStats(psf_area, 'PSF_Area');
+calculateStats(control_area, 'Control_Area');
+
+// Visualization for quality check
+Map.centerObject(psf_area, 13);
+Map.addLayer(ndvi_max_baseline, {min:0.1, max:0.5, palette:['white','yellow','green']}, 'Baseline_NDVI_Max_Mean');
+Map.addLayer(psf_area, {color: 'red'}, 'PSF_Boundaries', false);
+Map.addLayer(control_area, {color: 'blue'}, 'Control_Area_Boundaries', false);
